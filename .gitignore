@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+*.spec
+.pytest_cache/
+.ruff_cache/
+
+# generated brand/build inputs (python tools\make_icon.py / tools\version_info.txt)
+packaging/version_info.txt
+
+# local design reference mockups (not shipped, not committed)
+WattPulse Logo-html/
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.idea/
+.vscode/
