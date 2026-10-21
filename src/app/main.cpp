@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 
+#include "app/log.h"
 #include "app/platform_win.h"
 #include "app/settings.h"
 #include "core/estimator.h"
@@ -61,6 +62,21 @@ int cmd_probe() {
   wp::AppSettings settings = wp::load_settings(wp::data_dir() + "\\settings.ini");
   auto sensors = wp::make_sensors(settings);
   std::printf("probing %zu sensor(s)...\n", sensors.size());
+  bool any_available = false;
+  for (auto& s : sensors) {
+    bool available = false;
+    try {
+      available = s->available();
+    } catch (...) {
+      available = false;
+    }
+    any_available = any_available || available;
+    wp::log_info(std::string("probe: sensor ") + std::string(s->name()) +
+                 (available ? " available" : " unavailable"));
+  }
+  if (!any_available) {
+    std::printf("no power sensors available; run as a normal user and check your drivers.\n");
+  }
   for (int round = 0; round < 5; ++round) {
     std::printf("-- round %d --\n", round);
     for (auto& s : sensors) {
@@ -118,9 +134,12 @@ int cmd_calibrate(double wall_watts) {
   settings.base_watts = base;
   settings.calibrated = true;
   if (!wp::save_settings(path, settings)) {
+    wp::log_error("could not write settings: " + path);
     std::fprintf(stderr, "wattpulse: could not write %s\n", path.c_str());
     return 1;
   }
+  wp::log_info("calibrated base=" + std::to_string(base) + " cpu=" + std::to_string(cpu) +
+               " gpu=" + std::to_string(gpu) + " wall=" + std::to_string(wall_watts));
   std::printf("calibrated: base=%.1f W (cpu=%.1f gpu=%.1f, wall=%.1f W) -> %s\n", base, cpu, gpu,
               wall_watts, path.c_str());
   return 0;
@@ -134,6 +153,10 @@ struct LiveOptions {
 int cmd_live(const LiveOptions& opts) {
   const std::string dir = wp::data_dir();
   wp::AppSettings settings = wp::load_settings(dir + "\\settings.ini");
+  wp::log_info("settings: base=" + std::to_string(settings.base_watts) +
+               " calibrated=" + (settings.calibrated ? "true" : "false") +
+               " scale=" + std::to_string(settings.emi_scale) +
+               " form_factor=" + settings.form_factor);
 
   wp::Calibration cal;
   cal.base_watts = settings.base_watts;
@@ -143,14 +166,54 @@ int cmd_live(const LiveOptions& opts) {
   std::vector<std::unique_ptr<wp::ISensor>> sensors =
       opts.demo ? wp::make_demo_sensors() : wp::make_sensors(settings);
 
+  bool any_available = false;
+  for (auto& s : sensors) {
+    bool available = false;
+    try {
+      available = s->available();
+    } catch (...) {
+      available = false;
+    }
+    any_available = any_available || available;
+    wp::log_info(std::string("sensor ") + std::string(s->name()) +
+                 (available ? ": available" : ": unavailable"));
+  }
+  if (!any_available) {
+    wp::log_warn("no power sensors are available");
+    std::fprintf(stderr,
+                 "wattpulse: no power sensors found; live readings will be empty. "
+                 "Run `wattpulse --probe` and see docs/sensor-matrix.md.\n");
+  }
+
   wp::Store store;
   const bool persist = !opts.demo;
+  bool store_ok = false;
   if (persist) {
-    store.open(dir + "\\power.db", 35, wp::wall_seconds());
+    store_ok = store.open(dir + "\\power.db", 35, wp::wall_seconds());
+    if (store_ok) {
+      wp::log_info("storage: " + store.path());
+    } else {
+      wp::log_error("storage open failed: " + store.last_error());
+      std::fprintf(stderr,
+                   "wattpulse: storage unavailable (%s); live readings continue without "
+                   "totals.\n",
+                   store.last_error().c_str());
+    }
   }
 
   wp::Sampler sampler(std::move(sensors), model);
   sampler.start();
+
+  auto flush_pending = [&]() {
+    auto drained = sampler.drain_pending();
+    if (drained.empty()) return true;
+    if (!store.write(drained)) {
+      wp::log_error("storage write failed: " + store.last_error() + "; retrying later");
+      sampler.restore_pending(drained);
+      return false;
+    }
+    return true;
+  };
 
   std::uint64_t last_flush = 0;
   while (!g_stop) {
@@ -158,10 +221,9 @@ int cmd_live(const LiveOptions& opts) {
     wp::Snapshot snap = sampler.snapshot();
 
     // flush every 30 s (upsert += in the store, so partial minutes stay correct)
-    if (persist && snap.ticks - last_flush >= 30) {
+    if (store_ok && snap.ticks - last_flush >= 30) {
       last_flush = snap.ticks;
-      auto drained = sampler.drain_pending();
-      if (!drained.empty()) store.write(drained);
+      flush_pending();
     }
 
     if (!opts.silent) {
@@ -183,18 +245,25 @@ int cmd_live(const LiveOptions& opts) {
 
   sampler.stop();
 
-  if (persist) {
-    auto drained = sampler.drain_pending();
-    store.write(drained);
+  if (persist && store_ok) {
+    const bool flushed = flush_pending();
+    if (!flushed) {
+      std::fprintf(stderr, "wattpulse: last measurements could not be saved; see the log.\n");
+    }
     wp::Totals t = store.totals(wp::wall_seconds());
     std::printf("\n");
     print_totals_line(t);
+    wp::log_info("totals: hour=" + std::to_string(t.mwh_last_hour) +
+                 " day=" + std::to_string(t.mwh_last_day) +
+                 " week=" + std::to_string(t.mwh_last_week) +
+                 " month=" + std::to_string(t.mwh_last_month) + " mWh");
+  } else if (persist) {
+    std::printf("\nstorage unavailable: totals were not saved\n");
   } else {
     std::printf("\ndemo mode: nothing was saved\n");
   }
   return 0;
 }
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -239,6 +308,11 @@ int main(int argc, char** argv) {
     print_usage();
     return 0;
   }
+
+  const std::string data_dir = wp::data_dir();
+  wp::log_init(data_dir + "\\wattpulse.log", !silent);
+  wp::log_info("WattPulse 2.0.0 starting; data=" + data_dir);
+
   if (probe) return cmd_probe();
 
   if (autostart) {
@@ -246,11 +320,13 @@ int main(int argc, char** argv) {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     if (wp::set_autostart(autostart_enable, exe)) {
       std::printf("autostart %s\n", autostart_enable ? "enabled" : "disabled");
+      wp::log_info(std::string("autostart ") + (autostart_enable ? "enabled" : "disabled"));
       wp::AppSettings s = wp::load_settings(wp::data_dir() + "\\settings.ini");
       s.autostart = autostart_enable;
       wp::save_settings(wp::data_dir() + "\\settings.ini", s);
       return 0;
     }
+    wp::log_error("could not update the Run key");
     std::fprintf(stderr, "wattpulse: could not update the Run key\n");
     return 1;
   }

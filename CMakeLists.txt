@@ -29,6 +29,7 @@ add_library(wattpulse_core STATIC
   src/storage/store.cpp
   src/app/settings.cpp
   src/app/platform_win.cpp
+  src/app/log.cpp
   src/ui/format.cpp
 )
 target_include_directories(wattpulse_core PUBLIC src)
@@ -50,6 +51,8 @@ if(WATTPULSE_BUILD_TESTS)
     tests/test_estimator.cpp
     tests/test_storage.cpp
     tests/test_format.cpp
+    tests/test_sensor_parse.cpp
+    tests/test_sampler.cpp
   )
   target_include_directories(wattpulse_tests PRIVATE third_party/catch2)
   target_compile_definitions(wattpulse_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)

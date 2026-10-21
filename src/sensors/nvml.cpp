@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include "sensors/parse.h"
+
 namespace wp {
 
 namespace {
@@ -51,12 +53,24 @@ bool NvmlSensor::init() {
   g_api.shutdown = reinterpret_cast<NvmlShutdown_t>(GetProcAddress(mod, "nvmlShutdown"));
   g_api.get_count =
       reinterpret_cast<NvmlDeviceGetCount_t>(GetProcAddress(mod, "nvmlDeviceGetCount_v2"));
+  if (!g_api.get_count) {
+    g_api.get_count =
+        reinterpret_cast<NvmlDeviceGetCount_t>(GetProcAddress(mod, "nvmlDeviceGetCount"));
+  }
   g_api.get_handle = reinterpret_cast<NvmlDeviceGetHandleByIndex_t>(
       GetProcAddress(mod, "nvmlDeviceGetHandleByIndex_v2"));
+  if (!g_api.get_handle) {
+    g_api.get_handle = reinterpret_cast<NvmlDeviceGetHandleByIndex_t>(
+        GetProcAddress(mod, "nvmlDeviceGetHandleByIndex"));
+  }
   g_api.get_power =
       reinterpret_cast<NvmlDeviceGetPowerUsage_t>(GetProcAddress(mod, "nvmlDeviceGetPowerUsage"));
   g_api.get_name =
       reinterpret_cast<NvmlDeviceGetName_t>(GetProcAddress(mod, "nvmlDeviceGetName_v2"));
+  if (!g_api.get_name) {
+    g_api.get_name =
+        reinterpret_cast<NvmlDeviceGetName_t>(GetProcAddress(mod, "nvmlDeviceGetName"));
+  }
   if (!g_api.init || !g_api.shutdown || !g_api.get_count || !g_api.get_handle || !g_api.get_power) {
     shutdown();
     return false;
@@ -106,7 +120,7 @@ void NvmlSensor::poll(std::vector<Sample>& out) {
     if (g_api.get_power(g_api.handles[i], &mw) != NVML_SUCCESS) continue;
     Sample s;
     s.domain = Domain::Gpu;
-    s.watts = static_cast<double>(mw) / 1000.0;
+    s.watts = milliwatts_to_watts(mw);
     s.provenance = Provenance::Measured;
     s.sourceId = "nvml:" + std::to_string(i);
     out.push_back(std::move(s));

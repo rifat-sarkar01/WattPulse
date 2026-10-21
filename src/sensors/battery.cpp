@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cmath>
 
+#include "sensors/parse.h"
+
 namespace wp {
 
 namespace {
@@ -12,8 +14,6 @@ namespace {
 constexpr DWORD IOCTL_BATTERY_QUERY_TAG = 0x294040;
 constexpr DWORD IOCTL_BATTERY_QUERY_STATUS = 0x29404C;
 constexpr LONG UNKNOWN_RATE = LONG(0x80000000);
-constexpr ULONG PS_DISCHARGING = 0x2;
-constexpr ULONG PS_CHARGING = 0x4;
 constexpr double RESCAN_AFTER_ERROR = 5.0;
 constexpr double RESCAN_WHEN_EMPTY = 60.0;
 
@@ -102,16 +102,10 @@ bool BatterySensor::available() {
 }
 
 void BatterySensor::poll(std::vector<Sample>& out) {
-  SYSTEM_POWER_STATUS sps{};
-  int percent = -1;
-  if (GetSystemPowerStatus(&sps) && sps.BatteryLifePercent <= 100) {
-    percent = sps.BatteryLifePercent;
-  }
-
   if (!available()) return;
 
-  ULONG flags = 0;
-  LONG mw = 0;
+  std::uint32_t flags = 0;
+  std::int64_t mw = 0;
   bool known = false;
   int answered = 0;
   for (Device& d : devs_) {
@@ -127,37 +121,13 @@ void BatterySensor::poll(std::vector<Sample>& out) {
     ++answered;
     flags |= st.PowerState;
     if (st.Rate != UNKNOWN_RATE) {
-      mw += (st.Rate < 0) ? -st.Rate : st.Rate;
+      mw += std::llabs(static_cast<long long>(st.Rate));
       known = true;
     }
   }
-  (void)percent;
-  if (answered == 0) return;  // nobody answered: claim nothing
 
-  const bool charging = (flags & PS_CHARGING) != 0;
-  const bool discharging = (flags & PS_DISCHARGING) != 0;
-
-  if (discharging && known && mw > 0) {
-    Sample s;
-    s.domain = Domain::SystemTotal;  // discharge = whole-system draw
-    s.watts = static_cast<double>(mw) / 1000.0;
-    s.provenance = Provenance::Measured;
-    s.sourceId = "battery";
-    out.push_back(std::move(s));
-  } else if (charging && known && mw > 0) {
-    Sample s;
-    s.domain = Domain::Battery;
-    s.watts = static_cast<double>(mw) / 1000.0;
-    s.provenance = Provenance::Measured;
-    s.sourceId = "battery:charge";
-    out.push_back(std::move(s));
-  } else if (!charging && !discharging) {
-    Sample s;
-    s.domain = Domain::Battery;
-    s.watts = 0.0;
-    s.provenance = Provenance::Measured;
-    s.sourceId = "battery:ac";
-    out.push_back(std::move(s));
+  if (auto sample = make_battery_sample(flags, known ? mw : 0, answered)) {
+    out.push_back(std::move(*sample));
   }
 }
 

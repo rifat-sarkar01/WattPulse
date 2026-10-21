@@ -5,6 +5,8 @@
 
 #include <cmath>
 
+#include "sensors/parse.h"
+
 #pragma comment(lib, "pdh.lib")
 
 namespace wp {
@@ -51,20 +53,14 @@ bool EmiSensor::open_queries() {
 
   for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
     std::wstring path(p);
-    Domain d;
-    if (path.find(L"_PKG)\\Power") != std::wstring::npos) {
-      d = Domain::CpuPackage;
-    } else if (path.find(L"_PSYS)\\Power") != std::wstring::npos) {
-      d = Domain::SystemTotal;  // platform power ~= whole system on many CPUs
-    } else {
-      continue;  // core/DRAM counters: skip (package covers them)
-    }
+    const auto d = emi_domain_from_path(path);
+    if (!d.has_value()) continue;  // core/DRAM counters: skip (package covers them)
     HCOUNTER counter = nullptr;
     if (PdhAddEnglishCounterW(query_, path.c_str(), 0, &counter) != ERROR_SUCCESS) {
       continue;
     }
     paths_.push_back(path);
-    domains_.push_back(d);
+    domains_.push_back(*d);
     sources_.push_back(counter);
   }
 
@@ -101,11 +97,11 @@ void EmiSensor::poll(std::vector<Sample>& out) {
     if (value.CStatus != PDH_CSTATUS_VALID_DATA && value.CStatus != PDH_CSTATUS_NEW_DATA) {
       continue;
     }
-    const double raw = value.doubleValue;
-    if (!std::isfinite(raw) || raw < 0.0) continue;
+    const auto watts = emi_raw_to_watts(value.doubleValue, scale_);
+    if (!watts.has_value()) continue;
     Sample s;
     s.domain = domains_[i];
-    s.watts = raw * scale_;
+    s.watts = *watts;
     s.provenance = Provenance::Measured;
     // sourceId: "emi:RAPL_Package0_PKG"
     std::wstring w = paths_[i];

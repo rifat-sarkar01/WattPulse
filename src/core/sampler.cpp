@@ -1,6 +1,10 @@
 #include "core/sampler.h"
 
 #include <chrono>
+#include <exception>
+#include <string>
+
+#include "app/log.h"
 
 namespace wp {
 
@@ -37,13 +41,25 @@ void Sampler::stop() {
 }
 
 void Sampler::run() {
+  using clock = std::chrono::steady_clock;
+  auto next = clock::now();
   while (!stop_) {
     poll_once(monotonic_seconds(), wall_seconds());
-    // sleep in small slices so stop() is responsive
-    const auto slices = static_cast<int>(interval_ * 10.0);
-    for (int i = 0; i < slices && !stop_; ++i) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    next += std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(interval_));
+    // sleep in small slices so stop() is responsive, but keep a fixed cadence
+    while (!stop_) {
+      const auto now = clock::now();
+      if (now >= next) break;
+      const auto remaining = next - now;
+      const auto slice = remaining < std::chrono::milliseconds(100)
+                             ? remaining
+                             : std::chrono::duration_cast<clock::duration>(
+                                   std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(slice);
     }
+    // after a long stall (sleep/resume), restart the cadence instead of bursting
+    if (clock::now() - next > std::chrono::seconds(5)) next = clock::now();
   }
 }
 
@@ -53,6 +69,9 @@ void Sampler::poll_once(double mono_t, double wall_t) {
   bool ok = false;
   for (std::size_t i = 0; i < sensors_.size(); ++i) {
     ISensor* s = sensors_[i].get();
+    const bool was_ok = sensor_ok_[i];
+    const std::string name(s->name());
+    std::string error;
     bool this_ok = false;
     try {
       if (s->available()) {
@@ -60,11 +79,20 @@ void Sampler::poll_once(double mono_t, double wall_t) {
         s->poll(samples);
         this_ok = samples.size() > before;
       }
+    } catch (const std::exception& e) {
+      error = e.what();
+      this_ok = false;
     } catch (...) {
       this_ok = false;
     }
     sensor_ok_[i] = this_ok;
     ok = ok || this_ok;
+    if (was_ok && !this_ok) {
+      log_warn("sensor " + name + " stopped returning data" +
+               (error.empty() ? "" : ": " + error));
+    } else if (!was_ok && this_ok) {
+      log_info("sensor " + name + " is producing data");
+    }
   }
 
   // Apply the model: attach estimated total when no measured one exists.

@@ -2,42 +2,153 @@
 
 #include <sqlite3.h>
 
+#include <ctime>
+#include <string>
+#include <vector>
+
 namespace wp {
 
+namespace {
+
+constexpr const char* kSchema =
+    "CREATE TABLE IF NOT EXISTS energy ("
+    "ts INTEGER PRIMARY KEY,"
+    "mwh_total REAL NOT NULL DEFAULT 0,"
+    "mwh_cpu REAL NOT NULL DEFAULT 0,"
+    "mwh_gpu REAL NOT NULL DEFAULT 0,"
+    "mwh_other REAL NOT NULL DEFAULT 0,"
+    "mwh_estimated REAL NOT NULL DEFAULT 0,"
+    "flags INTEGER NOT NULL DEFAULT 0)";
+
+}  // namespace
+
 Store::~Store() { close(); }
+
+bool Store::fail(const std::string& message) {
+  last_error_ = message;
+  return false;
+}
 
 bool Store::exec(const char* sql) {
   char* err = nullptr;
   const int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err);
+  if (rc != SQLITE_OK) {
+    last_error_ = err ? err : sqlite3_errmsg(db_);
+    if (err) sqlite3_free(err);
+    return false;
+  }
   if (err) sqlite3_free(err);
-  return rc == SQLITE_OK;
+  return true;
+}
+
+bool Store::table_columns(std::set<std::string>& columns) const {
+  columns.clear();
+  sqlite3_stmt* stmt = nullptr;
+  if (sqlite3_prepare_v2(db_, "PRAGMA table_info(energy)", -1, &stmt, nullptr) != SQLITE_OK) {
+    return false;
+  }
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const unsigned char* name = sqlite3_column_text(stmt, 1);
+    if (name) columns.insert(reinterpret_cast<const char*>(name));
+  }
+  sqlite3_finalize(stmt);
+  return true;
+}
+
+bool Store::add_missing_columns(const std::set<std::string>& columns) {
+  struct Column {
+    const char* name;
+    const char* definition;
+  };
+  const Column wanted[] = {
+      {"mwh_total", "REAL NOT NULL DEFAULT 0"},
+      {"mwh_cpu", "REAL NOT NULL DEFAULT 0"},
+      {"mwh_gpu", "REAL NOT NULL DEFAULT 0"},
+      {"mwh_other", "REAL NOT NULL DEFAULT 0"},
+      {"mwh_estimated", "REAL NOT NULL DEFAULT 0"},
+      {"flags", "INTEGER NOT NULL DEFAULT 0"},
+  };
+  for (const Column& c : wanted) {
+    if (columns.count(c.name)) continue;
+    const std::string sql =
+        std::string("ALTER TABLE energy ADD COLUMN ") + c.name + " " + c.definition;
+    if (!exec(sql.c_str())) return false;
+  }
+  return true;
+}
+
+bool Store::migrate_v1(const std::set<std::string>& columns) {
+  const std::string backup =
+      "energy_v1_" + std::to_string(static_cast<long long>(std::time(nullptr)));
+  const bool has_estimated = columns.count("mwh_estimated") != 0;
+
+  if (!exec("BEGIN")) return false;
+  const std::string rename = "ALTER TABLE energy RENAME TO " + backup;
+  if (!exec(rename.c_str())) {
+    exec("ROLLBACK");
+    return false;
+  }
+  if (!exec(kSchema)) {
+    exec("ROLLBACK");
+    return false;
+  }
+
+  const std::string estimated = has_estimated ? "COALESCE(mwh_estimated,0)" : "0";
+  const std::string flags =
+      has_estimated
+          ? "CASE WHEN COALESCE(mwh_estimated,0) > 0 AND "
+            "COALESCE(mwh_estimated,0) >= mwh THEN 1 ELSE 2 END"
+          : "2";
+  const std::string copy =
+      "INSERT INTO energy(ts, mwh_total, mwh_cpu, mwh_gpu, mwh_other, mwh_estimated, flags) "
+      "SELECT ts, mwh, 0, 0, 0, " +
+      estimated + ", " + flags + " FROM " + backup;
+  if (!exec(copy.c_str()) || !exec(("DROP TABLE " + backup).c_str()) || !exec("COMMIT")) {
+    exec("ROLLBACK");
+    return false;
+  }
+  return true;
+}
+
+bool Store::ensure_schema() {
+  std::set<std::string> columns;
+  if (!table_columns(columns)) {
+    return fail(std::string("could not inspect the energy table: ") + sqlite3_errmsg(db_));
+  }
+  if (columns.empty()) {
+    return exec(kSchema);
+  }
+  if (columns.count("mwh_total") && columns.count("ts")) {
+    return add_missing_columns(columns);
+  }
+  if (columns.count("mwh") && columns.count("ts")) {
+    return migrate_v1(columns);
+  }
+
+  // Unrecognised table: keep it as a backup instead of overwriting user data.
+  const std::string backup =
+      "energy_legacy_" + std::to_string(static_cast<long long>(std::time(nullptr)));
+  if (!exec(("ALTER TABLE energy RENAME TO " + backup).c_str())) return false;
+  return exec(kSchema);
 }
 
 bool Store::open(const std::string& path, int keep_days, double now_unix) {
   close();
   path_ = path;
   keep_days_ = keep_days;
+  last_error_.clear();
   if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK) {
+    const std::string message = db_ ? sqlite3_errmsg(db_) : "could not open database";
     close();
-    return false;
+    return fail(message);
   }
   exec("PRAGMA journal_mode=WAL");
   exec("PRAGMA synchronous=NORMAL");
-  const bool ok =
-      exec("CREATE TABLE IF NOT EXISTS energy ("
-           "ts INTEGER PRIMARY KEY,"
-           "mwh_total REAL NOT NULL DEFAULT 0,"
-           "mwh_cpu REAL NOT NULL DEFAULT 0,"
-           "mwh_gpu REAL NOT NULL DEFAULT 0,"
-           "mwh_other REAL NOT NULL DEFAULT 0,"
-           "mwh_estimated REAL NOT NULL DEFAULT 0,"
-           "flags INTEGER NOT NULL DEFAULT 0)");
-  if (!ok) {
+  if (!ensure_schema()) {
     close();
     return false;
   }
-  // databases created before the estimated-share column existed
-  exec("ALTER TABLE energy ADD COLUMN mwh_estimated REAL NOT NULL DEFAULT 0");
+  exec("PRAGMA user_version=2");
   if (now_unix > 0.0) {
     const std::int64_t cut =
         static_cast<std::int64_t>(now_unix) - static_cast<std::int64_t>(keep_days_) * 86400;
@@ -61,6 +172,7 @@ void Store::close() {
 
 bool Store::write(const std::map<std::int64_t, MinuteBucket>& rows) {
   if (!db_ || rows.empty()) return true;
+  last_error_.clear();
   if (!exec("BEGIN")) return false;
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
@@ -74,8 +186,9 @@ bool Store::write(const std::map<std::int64_t, MinuteBucket>& rows) {
       "mwh_estimated = mwh_estimated + excluded.mwh_estimated,"
       "flags = flags | excluded.flags";
   if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    const std::string message = sqlite3_errmsg(db_);
     exec("ROLLBACK");
-    return false;
+    return fail(message);
   }
   for (const auto& [ts, b] : rows) {
     sqlite3_reset(stmt);
@@ -87,9 +200,10 @@ bool Store::write(const std::map<std::int64_t, MinuteBucket>& rows) {
     sqlite3_bind_double(stmt, 6, b.mwh_estimated);
     sqlite3_bind_int(stmt, 7, static_cast<int>(b.flags));
     if (sqlite3_step(stmt) != SQLITE_DONE) {
+      const std::string message = sqlite3_errmsg(db_);
       sqlite3_finalize(stmt);
       exec("ROLLBACK");
-      return false;
+      return fail(message);
     }
   }
   sqlite3_finalize(stmt);

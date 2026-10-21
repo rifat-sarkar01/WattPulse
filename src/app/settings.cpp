@@ -40,6 +40,12 @@ std::string data_dir() {
   const DWORD n = GetEnvironmentVariableA("APPDATA", buf, MAX_PATH);
   std::string base = (n > 0 && n < MAX_PATH) ? std::string(buf) : std::string(".");
   std::string dir = base + "\\WattPulse";
+  if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    const std::string legacy = base + "\\Wattly";
+    if (GetFileAttributesA(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      MoveFileExA(legacy.c_str(), dir.c_str(), 0);
+    }
+  }
   CreateDirectoryA(dir.c_str(), nullptr);
   return dir;
 }

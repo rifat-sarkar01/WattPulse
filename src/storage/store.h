@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 
 #include "core/energy_integrator.h"
@@ -37,12 +38,20 @@ class Store {
   Totals totals(double now_unix) const;
 
   const std::string& path() const { return path_; }
+  // Why the last open/write failed. Empty after a successful call.
+  const std::string& last_error() const { return last_error_; }
 
  private:
   bool exec(const char* sql);
+  bool ensure_schema();
+  bool table_columns(std::set<std::string>& columns) const;
+  bool add_missing_columns(const std::set<std::string>& columns);
+  bool migrate_v1(const std::set<std::string>& columns);
+  bool fail(const std::string& message);
 
   sqlite3* db_ = nullptr;
   std::string path_;
+  std::string last_error_;
   int keep_days_ = 35;
 };
 

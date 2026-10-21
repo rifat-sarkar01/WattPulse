@@ -54,7 +54,11 @@ exposes and how to calibrate.
 
 Energy totals are integrated per minute (trapezoid rule, gaps > 5 s from
 sleep/resume are not counted) into `%APPDATA%\WattPulse\power.db`, kept for
-35 days as rolling windows.
+35 days as rolling windows. Databases written by v1 (`ts, mwh`) are migrated in
+place on first start; if migration fails, the original table is left untouched.
+
+Runtime diagnostics (sensor availability, storage errors, totals) are written
+to `%APPDATA%\WattPulse\wattpulse.log` and echoed to the console.
 
 ## Settings
 

@@ -1,5 +1,7 @@
 #include <catch_amalgamated.hpp>
 
+#include <sqlite3.h>
+
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -94,4 +96,67 @@ TEST_CASE("open failure returns false, not a crash") {
   REQUIRE_FALSE(store.is_open());
   const std::map<std::int64_t, MinuteBucket> nothing;
   REQUIRE(store.write(nothing));  // no-op while closed
+}
+
+namespace {
+void remove_db_files(const std::string& path) {
+  std::remove(path.c_str());
+  std::remove((path + "-wal").c_str());
+  std::remove((path + "-shm").c_str());
+}
+
+void exec_sql(const std::string& path, const char* sql) {
+  sqlite3* db = nullptr;
+  REQUIRE(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
+  char* err = nullptr;
+  const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+  if (err) sqlite3_free(err);
+  sqlite3_close(db);
+  REQUIRE(rc == SQLITE_OK);
+}
+}  // namespace
+
+TEST_CASE("v1 database without an estimated column is migrated") {
+  const std::string path = temp_db();
+  const double now = 1000000.0;
+  exec_sql(path,
+           "CREATE TABLE energy (ts INTEGER PRIMARY KEY, mwh REAL NOT NULL);"
+           "INSERT INTO energy(ts, mwh) VALUES(999880, 500);");
+
+  Store store;
+  REQUIRE(store.open(path, 35, now));
+  REQUIRE(store.last_error().empty());
+
+  std::map<std::int64_t, MinuteBucket> rows;
+  MinuteBucket b;
+  b.mwh_total = 250.0;
+  b.flags = FLAG_MEASURED;
+  rows[999940] = b;
+  REQUIRE(store.write(rows));
+
+  const wp::Totals t = store.totals(now);
+  REQUIRE(t.mwh_last_hour == Catch::Approx(750.0));
+  REQUIRE(t.mwh_estimated == Catch::Approx(0.0));
+  store.close();
+  remove_db_files(path);
+}
+
+TEST_CASE("v1 database with an estimated column preserves old energy") {
+  const std::string path = temp_db();
+  const double now = 1000000.0;
+  exec_sql(path,
+           "CREATE TABLE energy (ts INTEGER PRIMARY KEY, mwh REAL NOT NULL,"
+           " mwh_estimated REAL NOT NULL DEFAULT 0);"
+           "INSERT INTO energy(ts, mwh, mwh_estimated) VALUES(999880, 400, 400);");
+
+  Store store;
+  REQUIRE(store.open(path, 35, now));
+  REQUIRE(store.last_error().empty());
+
+  const wp::Totals t = store.totals(now);
+  REQUIRE(t.mwh_last_hour == Catch::Approx(400.0));
+  REQUIRE(t.mwh_estimated == Catch::Approx(400.0));
+  REQUIRE(t.mwh_measured == Catch::Approx(0.0));
+  store.close();
+  remove_db_files(path);
 }
