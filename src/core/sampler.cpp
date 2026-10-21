@@ -1,0 +1,151 @@
+#include "core/sampler.h"
+
+#include <chrono>
+
+namespace wp {
+
+double monotonic_seconds() {
+  using namespace std::chrono;
+  return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+double wall_seconds() {
+  using namespace std::chrono;
+  return duration<double>(system_clock::now().time_since_epoch()).count();
+}
+
+Sampler::Sampler(std::vector<std::unique_ptr<ISensor>> sensors, PowerModel model,
+                 double interval_seconds, double max_gap_seconds)
+    : sensors_(std::move(sensors)),
+      model_(std::move(model)),
+      interval_(interval_seconds),
+      integrator_(max_gap_seconds) {
+  sensor_ok_.assign(sensors_.size(), false);
+}
+
+Sampler::~Sampler() { stop(); }
+
+void Sampler::start() {
+  if (thread_.joinable()) return;
+  stop_ = false;
+  thread_ = std::thread([this] { run(); });
+}
+
+void Sampler::stop() {
+  stop_ = true;
+  if (thread_.joinable()) thread_.join();
+}
+
+void Sampler::run() {
+  while (!stop_) {
+    poll_once(monotonic_seconds(), wall_seconds());
+    // sleep in small slices so stop() is responsive
+    const auto slices = static_cast<int>(interval_ * 10.0);
+    for (int i = 0; i < slices && !stop_; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
+}
+
+void Sampler::poll_once(double mono_t, double wall_t) {
+  std::vector<Sample> samples;
+  samples.reserve(16);
+  bool ok = false;
+  for (std::size_t i = 0; i < sensors_.size(); ++i) {
+    ISensor* s = sensors_[i].get();
+    bool this_ok = false;
+    try {
+      if (s->available()) {
+        const std::size_t before = samples.size();
+        s->poll(samples);
+        this_ok = samples.size() > before;
+      }
+    } catch (...) {
+      this_ok = false;
+    }
+    sensor_ok_[i] = this_ok;
+    ok = ok || this_ok;
+  }
+
+  // Apply the model: attach estimated total when no measured one exists.
+  ModelOutput model = model_.evaluate(samples);
+  if (!model.total_watts.has_value()) {
+    model.samples = samples;
+  } else if (model.total_provenance == Provenance::Estimated) {
+    // Re-tag the total so the integrator stores it with the right flag.
+    Sample total;
+    total.domain = Domain::SystemTotal;
+    total.watts = model.total_watts;
+    total.provenance = Provenance::Estimated;
+    total.sourceId = "estimate";
+    samples.push_back(total);
+  }
+
+  integrator_.tick(mono_t, wall_t, samples);
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  last_model_ = std::move(model);
+  any_ok_ = ok;
+  ++ticks_;
+  // fold freshly completed buckets into the visible pending set
+  for (auto& [ts, b] : integrator_.drain()) {
+    MinuteBucket& t = pending_[ts];
+    t.mwh_total += b.mwh_total;
+    t.mwh_cpu += b.mwh_cpu;
+    t.mwh_gpu += b.mwh_gpu;
+    t.mwh_other += b.mwh_other;
+    t.mwh_estimated += b.mwh_estimated;
+    t.flags |= b.flags;
+  }
+}
+
+Snapshot Sampler::snapshot() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Snapshot s;
+  s.model = last_model_;
+  s.pending = pending_;
+  s.ticks = ticks_;
+  s.any_sensor_ok = any_ok_;
+  return s;
+}
+
+std::map<std::int64_t, MinuteBucket> Sampler::drain_pending() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::map<std::int64_t, MinuteBucket> out;
+  out.swap(pending_);
+  return out;
+}
+
+void Sampler::restore_pending(const std::map<std::int64_t, MinuteBucket>& rows) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& [ts, b] : rows) {
+    MinuteBucket& t = pending_[ts];
+    t.mwh_total += b.mwh_total;
+    t.mwh_cpu += b.mwh_cpu;
+    t.mwh_gpu += b.mwh_gpu;
+    t.mwh_other += b.mwh_other;
+    t.mwh_estimated += b.mwh_estimated;
+    t.flags |= b.flags;
+  }
+}
+
+void Sampler::set_model(const PowerModel& model) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  model_ = model;
+}
+
+std::vector<std::string> Sampler::sensor_status() const {
+  std::vector<std::string> out;
+  for (std::size_t i = 0; i < sensors_.size(); ++i) {
+    bool ok = false;
+    try {
+      ok = sensors_[i]->available();
+    } catch (...) {
+      ok = false;
+    }
+    out.push_back(std::string(sensors_[i]->name()) + (ok ? ": ok" : ": unavailable"));
+  }
+  return out;
+}
+
+}  // namespace wp

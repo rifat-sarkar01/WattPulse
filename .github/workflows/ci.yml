@@ -1,36 +1,27 @@
 name: ci
-on: [push, pull_request]
-jobs:
-  test:
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-        python: ["3.10", "3.13"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "${{ matrix.python }}" }
-      - run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
-        if: runner.os == 'Linux'
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
-        if: runner.os == 'Windows'
-      - run: xvfb-run -a pytest
-        if: runner.os == 'Linux'
 
-  package:
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
     runs-on: windows-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.13" }
-      - run: pip install -e ".[build]"
-      - run: .\packaging\build.ps1
-      - uses: actions/upload-artifact@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
         with:
-          name: WattPulse
-          path: dist/WattPulse.exe
-          if-no-files-found: error
+          name: wattpulse
+          path: build/Release/wattpulse.exe

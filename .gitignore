@@ -1,17 +1,19 @@
-__pycache__/
-*.py[cod]
-.venv/
+# Build
 build/
-dist/
-*.egg-info/
-*.spec
-.pytest_cache/
-.ruff_cache/
+out/
+cmake-build-*/
+CMakeUserPresets.json
 
-# generated brand/build inputs (python tools\make_icon.py / tools\version_info.txt)
-packaging/version_info.txt
+# Binaries
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.idb
 
-# local design reference mockups (not shipped, not committed)
+# Local design reference mockups (not shipped, not committed)
 WattPulse Logo-html/
 
 # OS / editor noise

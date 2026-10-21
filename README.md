@@ -2,82 +2,105 @@
 
 # WattPulse
 
-Live device power draw for Windows, plus energy used over the last hour, day, week and month.
-Tiny (standard library only), no background services, pinnable to the taskbar.
+Live device power draw for Windows, plus energy used over the last hour, day,
+week and month. Native C++20, single static exe, no runtime to install.
+
+**v2** (this branch) is a rewrite: multi-source measurement (works on desktops,
+not just laptops), an honest Measured/Estimated provenance label, calibration
+against a wall meter, and a CLI. The Direct2D UI and tray widget from the
+[v2 plan](WattPulse-v2-Plan.md) are the next milestone.
+
+## Build
+
+Requires Visual Studio 2022+ (MSVC) and CMake 3.21+.
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The exe lands at `build\Release\wattpulse.exe`. It is statically linked
+(`/MT`), so it runs on any x64 Windows 10/11 machine without a runtime.
 
 ## Run
 
 ```powershell
-python -m venv .venv ; .\.venv\Scripts\activate
-pip install -e .
-wattpulse                    # windowless launcher
-python -m wattpulse --demo   # preview with fake data (nothing is saved)
-python -m wattpulse --probe  # print 5 raw sensor readings (diagnostics)
+wattpulse.exe --probe           # what sensors does this machine expose?
+wattpulse.exe --demo            # synthetic data preview (nothing saved)
+wattpulse.exe --run             # live 1 Hz readout + rolling totals on exit
+wattpulse.exe --run --silent    # for autostart: no console output
+wattpulse.exe --calibrate 120   # set the modelled base from a wall meter (W)
+wattpulse.exe --autostart on    # start with Windows (off by default)
 ```
-
-## Build a pinnable exe
-
-```powershell
-pip install -e ".[build]"
-.\packaging\build.ps1      # -> dist\WattPulse.exe, right-click -> Pin to taskbar
-```
-
-The script regenerates the brand assets, stamps the exe with the version from
-`src/wattpulse/__init__.py`, applies the DPI-aware manifest, and bundles the
-`wattpulse.ico` window icon. CI runs the same script and uploads `WattPulse.exe`
-as a build artifact.
 
 ## How it measures
 
-Power comes from the battery driver (`IOCTL_BATTERY_QUERY_STATUS`), the same source Windows'
-own battery meter uses. That means:
+v1 read only the battery driver, so it could not run on a desktop. v2 tries
+every driverless source in order and labels the result:
 
-- **Laptops/tablets:** works. **Desktops:** no sensor exists; the app says so.
-- Energy totals are integrated **only while on battery**. Plugged in, the battery cannot
-  report what the system itself draws, so WattPulse shows the charge rate (green) and does not
-  add it to totals.
-- Totals are rolling windows (last 60 min, 24 h, 7 d, 30 d), stored per minute in
-  `%APPDATA%\WattPulse\power.db` and pruned after 35 days. Data from the pre-rename
-  `Wattly` folder is migrated on first start.
+| Tier | Source | Needs |
+|---|---|---|
+| 0 | Battery discharge (`IOCTL_BATTERY_QUERY_STATUS`) | a battery |
+| 0 | Windows Energy Meter / PDH (Intel RAPL-class counters) | many machines, no driver |
+| 0 | NVIDIA GPU (`nvml.dll`, loaded dynamically) | NVIDIA driver |
+| 0 | AMD GPU (ADLX, `amdadlx64.dll`, loaded dynamically) | AMD driver |
+| 3 | Estimator: `(CPU + GPU + base) / PSU-efficiency` | always available as fallback |
+
+The **Total** is chosen by priority: wall meter / UPS > PSYS or battery
+discharge > CPU + GPU + calibrated base (**Estimated**). The readout always
+shows which one is active. See `docs/sensor-matrix.md` for what your hardware
+exposes and how to calibrate.
+
+Energy totals are integrated per minute (trapezoid rule, gaps > 5 s from
+sleep/resume are not counted) into `%APPDATA%\WattPulse\power.db`, kept for
+35 days as rolling windows.
+
+## Settings
+
+`%APPDATA%\WattPulse\settings.ini`:
+
+```ini
+base_watts=45        # modelled board/RAM/drives draw
+calibrated=false     # true once --calibrate has been run
+autostart=false
+theme=graphite       # graphite | light | system (UI milestone)
+emi_scale=0.001      # EMI PDH counter scale; adjust if readings are 1000x off
+form_factor=desktop  # desktop | laptop | mini | unknown
+```
 
 ## Layout
 
 ```
-src/wattpulse/
-  app.py            entry point, CLI flags, wiring, crash reporting
-  config.py         constants and paths
-  sampler.py        1 Hz background thread, energy integration, chart history
-  storage.py        SQLite (minute buckets), rolling totals
-  format.py         W / Wh formatting, chart axis
-  platform_win.py   DPI, taskbar app-id, single instance, dark title bar
-  sensors/          base (Reading/State), windows (IOCTL), demo, null
-  ui/               window, chart, theme (design tokens), icon (brand mark)
-tests/              pytest (logic + headless UI smoke tests)
-tools/              make_icon.py (brand assets), version_info.py (exe resource)
-packaging/          PyInstaller build, exe manifest, launcher
-assets/             wattpulse.ico / wattpulse.png, generated from ui/icon.py
+src/
+  app/         entry point, settings, single instance, autostart
+  core/        Sample, ISensor, Sampler, EnergyIntegrator, PowerModel, Estimator
+  sensors/     battery, emi (PDH), nvml, adlx, demo, factory
+  storage/     SQLite minute buckets, rolling totals
+  ui/          text formatting (CLI)
+tests/         Catch2 unit tests (integrator, model, estimator, store, format)
+third_party/   sqlite3 amalgamation, Catch2 amalgamated, ADLX headers (AMD)
+docs/          sensor-matrix.md
 ```
 
-The UI never touches hardware or the database directly: the sampler thread owns the sensor,
-and the UI thread only reads snapshots and flushes to SQLite once every 30 s.
+The sampler thread owns the sensors and the integrator; everything else reads
+immutable snapshots. Every sensor is failure-isolated: if a source disappears
+(driver unload, eGPU unplug), it degrades to unavailable and the model falls
+back — never a crash.
 
 ## Develop
 
 ```powershell
-pip install -e ".[dev]"
-ruff check .
-pytest
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
 ```
 
-## Brand
+CI (GitHub Actions, `windows-latest`) builds, tests and uploads the exe on
+every push and PR.
 
-The mark, palette (Ink `#0E1424`, Volt `#F68E17`, Paper `#EEF0E8`) and stroke weights
-live in `ui/icon.py`, which redraws the brand sheet's geometry in code. That single
-renderer feeds the window icon, the header logo and `assets/wattpulse.ico`, so they
-cannot drift apart; regenerate the committed assets with `python tools/make_icon.py`.
+## Licence
 
-## Known limits / ideas
-
-- Verified on Linux with a fake sensor; run `wattpulse --probe` on your laptop first, since
-  vendors differ in how they report battery rate.
-- Not yet: tray icon, start-with-Windows toggle, CSV export, desktop power estimate.
+MIT — see [LICENSE](LICENSE). The ADLX headers under `third_party/adlx/` are
+AMD's SDK headers, distributed under the ADLX SDK License Agreement; they are
+used here to read GPU power only, and `amdadlx64.dll` is loaded from the
+user's own AMD driver at runtime (never redistributed).
