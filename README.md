@@ -7,8 +7,8 @@ week and month. Native C++20, single static exe, no runtime to install.
 
 **v2** (this branch) is a rewrite: multi-source measurement (works on desktops,
 not just laptops), an honest Measured/Estimated provenance label, calibration
-against a wall meter, and a CLI. The Direct2D UI and tray widget from the
-[v2 plan](WattPulse-v2-Plan.md) are the next milestone.
+against a wall meter, and a CLI. The Direct2D UI and tray widget are the next
+milestone.
 
 ## Build
 
