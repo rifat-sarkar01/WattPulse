@@ -10,7 +10,7 @@ struct AppSettings {
   double base_watts = 45.0;
   bool calibrated = false;
   bool autostart = false;
-  std::string theme = "graphite";  // graphite | light | system
+  std::string theme = "system";  // system | light | dark (graphite = legacy dark)
   double emi_scale = 0.001;        // EMI PDH counters report milliwatts
   std::string form_factor = "desktop";
 };

@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "core/energy_integrator.h"
 
@@ -18,6 +19,15 @@ struct Totals {
   double mwh_last_month = 0.0;
   double mwh_estimated = 0.0;   // estimated share over the month window
   double mwh_measured = 0.0;
+};
+
+struct SeriesPoint {
+  std::int64_t ts = 0;  // start of the bucket, unix seconds
+  double mwh_total = 0.0;
+  double mwh_cpu = 0.0;
+  double mwh_gpu = 0.0;
+  double mwh_other = 0.0;
+  double mwh_estimated = 0.0;
 };
 
 // SQLite store: one row per minute holding mWh per domain + flags.
@@ -36,6 +46,9 @@ class Store {
 
   bool write(const std::map<std::int64_t, MinuteBucket>& rows);
   Totals totals(double now_unix) const;
+  // Evenly spaced energy buckets covering [now - seconds, now]. Empty buckets
+  // are returned as zero rows so charts have a stable x-axis.
+  std::vector<SeriesPoint> series(double now_unix, int seconds, int bucket_seconds) const;
 
   const std::string& path() const { return path_; }
   // Why the last open/write failed. Empty after a successful call.

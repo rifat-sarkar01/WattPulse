@@ -47,6 +47,37 @@ TEST_CASE("write and read totals") {
   REQUIRE(t.mwh_estimated == Catch::Approx(0.0));
 }
 
+TEST_CASE("series groups rows into evenly spaced buckets") {
+  Store store;
+  REQUIRE(store.open(":memory:", 35, 1000000.0));
+  const std::int64_t now = 1000000;
+  std::map<std::int64_t, MinuteBucket> rows;
+  MinuteBucket a;
+  a.mwh_total = 100.0;
+  a.mwh_cpu = 40.0;
+  rows[998850] = a;
+  MinuteBucket b;
+  b.mwh_total = 60.0;
+  b.mwh_estimated = 60.0;
+  rows[999020] = b;
+  MinuteBucket c;
+  c.mwh_total = 250.0;
+  c.mwh_gpu = 200.0;
+  rows[999450] = c;
+  REQUIRE(store.write(rows));
+
+  const auto series = store.series(static_cast<double>(now), 1200, 300);
+  REQUIRE(series.size() == 4);
+  REQUIRE(series[0].ts == 998800);
+  REQUIRE(series[1].ts == 999100);
+  REQUIRE(series[2].ts == 999400);
+  REQUIRE(series[0].mwh_total == Catch::Approx(160.0));
+  REQUIRE(series[0].mwh_cpu == Catch::Approx(40.0));
+  REQUIRE(series[1].mwh_total == Catch::Approx(0.0));
+  REQUIRE(series[2].mwh_total == Catch::Approx(250.0));
+  REQUIRE(series[2].mwh_gpu == Catch::Approx(200.0));
+}
+
 TEST_CASE("same minute accumulates") {
   Store store;
   REQUIRE(store.open(":memory:", 35, 1000000.0));

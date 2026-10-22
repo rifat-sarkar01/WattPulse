@@ -56,6 +56,10 @@ TEST_CASE("sampler integrates an estimated total and exposes drainable buckets")
   auto snap = sampler.snapshot();
   REQUIRE(snap.ticks == 1);
   REQUIRE(snap.any_sensor_ok);
+  REQUIRE(snap.sensors.size() == 1);
+  REQUIRE(snap.sensors[0].name == "fake");
+  REQUIRE(snap.sensors[0].available);
+  REQUIRE(snap.sensors[0].producing);
   REQUIRE(snap.model.total_watts.has_value());
   REQUIRE(snap.model.total_provenance == wp::Provenance::Estimated);
 
@@ -91,9 +95,12 @@ TEST_CASE("a failing or unavailable sensor degrades without throwing") {
   auto snap = sampler.snapshot();
   REQUIRE_FALSE(snap.any_sensor_ok);
   REQUIRE_FALSE(snap.model.total_watts.has_value());
+  REQUIRE_FALSE(snap.sensors[0].available);
+  REQUIRE_FALSE(snap.sensors[0].producing);
 
   fake->set_throw(false);
   fake->set_available(false);
   REQUIRE_NOTHROW(sampler.poll_once(2.0, 62.0));
   REQUIRE_FALSE(sampler.snapshot().any_sensor_ok);
+  REQUIRE_FALSE(sampler.snapshot().sensors[0].available);
 }

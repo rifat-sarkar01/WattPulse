@@ -1,11 +1,15 @@
 #include <windows.h>
+#include <shellapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "app/log.h"
 #include "app/platform_win.h"
@@ -14,6 +18,7 @@
 #include "core/sampler.h"
 #include "sensors/factory.h"
 #include "storage/store.h"
+#include "ui/dashboard.h"
 #include "ui/format.h"
 
 namespace {
@@ -32,12 +37,15 @@ void print_usage() {
   std::printf(
       "WattPulse 2.0 - live power draw and energy totals\n"
       "\n"
-      "usage: wattpulse [--run] [--demo] [--probe] [--silent]\n"
-      "                 [--calibrate <wall-watts>] [--autostart on|off]\n"
-      "                 [--version] [--help]\n"
+      "usage: wattpulse [--ui] [--demo]\n"
+      "       wattpulse --run [--demo] [--silent]\n"
+      "       wattpulse --probe | --calibrate <wall-watts> | --autostart on|off\n"
+      "       wattpulse --version | --help\n"
       "\n"
-      "  --run               sample at 1 Hz and print a live line (default)\n"
-      "  --demo              synthetic data; nothing is saved\n"
+      "  (no arguments)      open the dashboard (default)\n"
+      "  --ui                open the dashboard\n"
+      "  --run               command-line live readout instead of the dashboard\n"
+      "  --demo              synthetic data; demo mode saves nothing\n"
       "  --probe             print sensor availability and 5 raw readings\n"
       "  --silent            no live line (for autostart)\n"
       "  --calibrate <W>     set the modelled base from a wall-meter reading\n"
@@ -264,65 +272,126 @@ int cmd_live(const LiveOptions& opts) {
   }
   return 0;
 }
-}  // namespace
 
-int main(int argc, char** argv) {
-  bool demo = false, probe = false, silent = false, want_run = false, help = false;
-  bool calibrate = false, autostart = false;
-  double cal_watts = 0.0;
-  bool autostart_enable = false;
+struct Options {
+  bool demo = false;
+  bool probe = false;
+  bool silent = false;
+  bool run = false;
+  bool help = false;
   bool version = false;
+  bool calibrate = false;
+  bool autostart = false;
+  bool autostart_enable = false;
+  bool ui = false;
+  bool console = false;
+  double cal_watts = 0.0;
+  std::string unknown;
+};
 
-  for (int i = 1; i < argc; ++i) {
-    const char* a = argv[i];
-    if (std::strcmp(a, "--demo") == 0) {
-      demo = true;
-    } else if (std::strcmp(a, "--probe") == 0) {
-      probe = true;
-    } else if (std::strcmp(a, "--run") == 0) {
-      want_run = true;
-    } else if (std::strcmp(a, "--silent") == 0) {
-      silent = true;
-    } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
-      help = true;
-    } else if (std::strcmp(a, "--version") == 0) {
-      version = true;
-    } else if (std::strcmp(a, "--calibrate") == 0 && i + 1 < argc) {
-      calibrate = true;
-      cal_watts = std::atof(argv[++i]);
-    } else if (std::strcmp(a, "--autostart") == 0 && i + 1 < argc) {
-      autostart = true;
-      autostart_enable = (std::strcmp(argv[++i], "on") == 0);
+std::string narrow(const wchar_t* text) {
+  if (!text || !*text) return {};
+  const int size =
+      WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+  if (size <= 1) return {};
+  std::string out(static_cast<std::size_t>(size - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), size, nullptr, nullptr);
+  return out;
+}
+
+Options parse_options(const std::vector<std::string>& args) {
+  Options opts;
+  opts.console = false;
+  for (const std::string& argument : args) {
+    if (argument == "--demo" || argument == "--ui") continue;
+    opts.console = true;
+    break;
+  }
+  opts.ui = !opts.console;
+
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string& a = args[i];
+    if (a == "--demo") {
+      opts.demo = true;
+    } else if (a == "--ui") {
+      // The dashboard is already selected when no console action is present.
+    } else if (a == "--probe") {
+      opts.probe = true;
+    } else if (a == "--run") {
+      opts.run = true;
+    } else if (a == "--silent") {
+      opts.silent = true;
+    } else if (a == "--help" || a == "-h") {
+      opts.help = true;
+    } else if (a == "--version") {
+      opts.version = true;
+    } else if (a == "--calibrate" && i + 1 < args.size()) {
+      opts.calibrate = true;
+      opts.cal_watts = std::atof(args[++i].c_str());
+    } else if (a == "--autostart" && i + 1 < args.size()) {
+      opts.autostart = true;
+      opts.autostart_enable = (args[++i] == "on");
     } else {
-      std::fprintf(stderr, "wattpulse: unknown argument %s\n", a);
-      print_usage();
-      return 2;
+      opts.unknown = a;
+      break;
     }
   }
 
-  if (version) {
+  // --silent only makes sense for the headless live loop.
+  if (opts.console && opts.silent && !opts.probe && !opts.help && !opts.version &&
+      !opts.calibrate && !opts.autostart) {
+    opts.run = true;
+  }
+  if (opts.run || opts.probe || opts.help || opts.version || opts.calibrate || opts.autostart) {
+    opts.ui = false;
+  }
+  return opts;
+}
+
+bool stream_is_redirected(DWORD standard_handle) {
+  const HANDLE handle = GetStdHandle(standard_handle);
+  if (!handle || handle == INVALID_HANDLE_VALUE) return false;
+  const DWORD type = GetFileType(handle);
+  return type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK;
+}
+
+void attach_console(bool create_if_missing) {
+  const bool attached = AttachConsole(ATTACH_PARENT_PROCESS) != FALSE;
+  if (!attached && create_if_missing) AllocConsole();
+  if (!attached && !create_if_missing) return;
+
+  FILE* stream = nullptr;
+  if (!stream_is_redirected(STD_OUTPUT_HANDLE)) {
+    freopen_s(&stream, "CONOUT$", "w", stdout);
+  }
+  if (!stream_is_redirected(STD_ERROR_HANDLE)) {
+    freopen_s(&stream, "CONOUT$", "w", stderr);
+  }
+  if (!stream_is_redirected(STD_INPUT_HANDLE)) {
+    freopen_s(&stream, "CONIN$", "r", stdin);
+  }
+}
+
+int run_cli(const Options& opts) {
+  if (opts.version) {
     std::printf("WattPulse 2.0.0\n");
     return 0;
   }
-  if (help) {
+  if (opts.help) {
     print_usage();
     return 0;
   }
+  if (opts.probe) return cmd_probe();
 
-  const std::string data_dir = wp::data_dir();
-  wp::log_init(data_dir + "\\wattpulse.log", !silent);
-  wp::log_info("WattPulse 2.0.0 starting; data=" + data_dir);
-
-  if (probe) return cmd_probe();
-
-  if (autostart) {
+  if (opts.autostart) {
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    if (wp::set_autostart(autostart_enable, exe)) {
-      std::printf("autostart %s\n", autostart_enable ? "enabled" : "disabled");
-      wp::log_info(std::string("autostart ") + (autostart_enable ? "enabled" : "disabled"));
+    if (wp::set_autostart(opts.autostart_enable, exe)) {
+      std::printf("autostart %s\n", opts.autostart_enable ? "enabled" : "disabled");
+      wp::log_info(std::string("autostart ") +
+                   (opts.autostart_enable ? "enabled" : "disabled"));
       wp::AppSettings s = wp::load_settings(wp::data_dir() + "\\settings.ini");
-      s.autostart = autostart_enable;
+      s.autostart = opts.autostart_enable;
       wp::save_settings(wp::data_dir() + "\\settings.ini", s);
       return 0;
     }
@@ -330,17 +399,67 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "wattpulse: could not update the Run key\n");
     return 1;
   }
-  if (calibrate) return cmd_calibrate(cal_watts);
+  if (opts.calibrate) return cmd_calibrate(opts.cal_watts);
 
-  // --run / default live loop. Single instance so totals are not double-counted.
-  if (!demo && !wp::acquire_single_instance(L"Local\\WattPulse.SingleInstance")) {
+  if (!opts.demo && !wp::acquire_single_instance(L"Local\\WattPulse.SingleInstance")) {
     std::fprintf(stderr, "wattpulse: another instance is already running\n");
     return 0;
   }
 
   SetConsoleCtrlHandler(on_console_ctrl, TRUE);
-  LiveOptions opts;
-  opts.demo = demo;
-  opts.silent = silent;
-  return cmd_live(opts);
+  LiveOptions live;
+  live.demo = opts.demo;
+  live.silent = opts.silent;
+  return cmd_live(live);
+}
+
+int run_app(HINSTANCE instance, int argc, wchar_t** argv) {
+  std::vector<std::string> args;
+  args.reserve(static_cast<std::size_t>(std::max(0, argc - 1)));
+  for (int i = 1; i < argc; ++i) args.push_back(narrow(argv[i]));
+  const Options opts = parse_options(args);
+
+  if (opts.console) attach_console(!opts.silent);
+
+  const std::string data_dir = wp::data_dir();
+  const bool quiet_command = opts.version || opts.help;
+  wp::log_init(data_dir + "\\wattpulse.log",
+               opts.console && !opts.silent && !quiet_command);
+  if (!quiet_command) {
+    wp::log_info(std::string("WattPulse 2.0.0 starting; mode=") +
+                 (opts.ui ? "dashboard" : "cli") + "; data=" + data_dir);
+  }
+
+  if (!opts.unknown.empty()) {
+    if (opts.console) {
+      std::fprintf(stderr, "wattpulse: unknown argument %s\n", opts.unknown.c_str());
+      print_usage();
+    } else {
+      MessageBoxW(nullptr, L"Unknown command-line option.", L"WattPulse", MB_ICONERROR);
+    }
+    return 2;
+  }
+  if (!opts.ui) return run_cli(opts);
+
+  if (!wp::acquire_single_instance(L"Local\\WattPulse.SingleInstance")) {
+    if (!wp::focus_dashboard_window()) {
+      MessageBoxW(nullptr, L"WattPulse is already running in the background.", L"WattPulse",
+                  MB_ICONINFORMATION);
+    }
+    return 0;
+  }
+
+  return wp::run_dashboard(instance, opts.demo);
+}
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv) return 1;
+  const int result = run_app(instance, argc, argv);
+  LocalFree(argv);
+  return result;
 }

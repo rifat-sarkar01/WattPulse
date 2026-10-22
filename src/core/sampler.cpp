@@ -24,6 +24,11 @@ Sampler::Sampler(std::vector<std::unique_ptr<ISensor>> sensors, PowerModel model
       model_(std::move(model)),
       interval_(interval_seconds),
       integrator_(max_gap_seconds) {
+  sensor_names_.reserve(sensors_.size());
+  for (const auto& sensor : sensors_) {
+    sensor_names_.emplace_back(sensor->name());
+  }
+  sensor_available_.assign(sensors_.size(), false);
   sensor_ok_.assign(sensors_.size(), false);
 }
 
@@ -70,21 +75,26 @@ void Sampler::poll_once(double mono_t, double wall_t) {
   for (std::size_t i = 0; i < sensors_.size(); ++i) {
     ISensor* s = sensors_[i].get();
     const bool was_ok = sensor_ok_[i];
-    const std::string name(s->name());
+    const std::string& name = sensor_names_[i];
     std::string error;
+    bool available = false;
     bool this_ok = false;
     try {
-      if (s->available()) {
+      available = s->available();
+      if (available) {
         const std::size_t before = samples.size();
         s->poll(samples);
         this_ok = samples.size() > before;
       }
     } catch (const std::exception& e) {
       error = e.what();
+      available = false;
       this_ok = false;
     } catch (...) {
+      available = false;
       this_ok = false;
     }
+    sensor_available_[i] = available;
     sensor_ok_[i] = this_ok;
     ok = ok || this_ok;
     if (was_ok && !this_ok) {
@@ -132,6 +142,11 @@ Snapshot Sampler::snapshot() const {
   Snapshot s;
   s.model = last_model_;
   s.pending = pending_;
+  s.sensors.reserve(sensor_names_.size());
+  for (std::size_t i = 0; i < sensor_names_.size(); ++i) {
+    s.sensors.push_back(
+        {sensor_names_[i], sensor_available_[i], sensor_ok_[i]});
+  }
   s.ticks = ticks_;
   s.any_sensor_ok = any_ok_;
   return s;
@@ -163,15 +178,13 @@ void Sampler::set_model(const PowerModel& model) {
 }
 
 std::vector<std::string> Sampler::sensor_status() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   std::vector<std::string> out;
-  for (std::size_t i = 0; i < sensors_.size(); ++i) {
-    bool ok = false;
-    try {
-      ok = sensors_[i]->available();
-    } catch (...) {
-      ok = false;
-    }
-    out.push_back(std::string(sensors_[i]->name()) + (ok ? ": ok" : ": unavailable"));
+  out.reserve(sensor_names_.size());
+  for (std::size_t i = 0; i < sensor_names_.size(); ++i) {
+    const char* state = sensor_ok_[i] ? ": ok"
+                                       : (sensor_available_[i] ? ": idle" : ": unavailable");
+    out.push_back(sensor_names_[i] + state);
   }
   return out;
 }

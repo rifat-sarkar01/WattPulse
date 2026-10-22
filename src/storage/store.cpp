@@ -210,6 +210,45 @@ bool Store::write(const std::map<std::int64_t, MinuteBucket>& rows) {
   return exec("COMMIT");
 }
 
+std::vector<SeriesPoint> Store::series(double now_unix, int seconds,
+                                       int bucket_seconds) const {
+  if (!db_ || seconds <= 0 || bucket_seconds <= 0) return {};
+  const std::int64_t now = static_cast<std::int64_t>(now_unix);
+  const std::int64_t start = now - seconds;
+  const int count = (seconds + bucket_seconds - 1) / bucket_seconds;
+  std::vector<SeriesPoint> out(static_cast<std::size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    out[static_cast<std::size_t>(i)].ts = start + static_cast<std::int64_t>(i) * bucket_seconds;
+  }
+
+  sqlite3_stmt* stmt = nullptr;
+  const char* sql =
+      "SELECT (ts - ?1) / ?2 AS bucket,"
+      "COALESCE(SUM(mwh_total),0),"
+      "COALESCE(SUM(mwh_cpu),0),"
+      "COALESCE(SUM(mwh_gpu),0),"
+      "COALESCE(SUM(mwh_other),0),"
+      "COALESCE(SUM(mwh_estimated),0) "
+      "FROM energy WHERE ts >= ?1 AND ts <= ?3 "
+      "GROUP BY bucket ORDER BY bucket";
+  if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+  sqlite3_bind_int64(stmt, 1, start);
+  sqlite3_bind_int64(stmt, 2, bucket_seconds);
+  sqlite3_bind_int64(stmt, 3, now);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const sqlite3_int64 bucket = sqlite3_column_int64(stmt, 0);
+    if (bucket < 0 || bucket >= count) continue;
+    SeriesPoint& point = out[static_cast<std::size_t>(bucket)];
+    point.mwh_total = sqlite3_column_double(stmt, 1);
+    point.mwh_cpu = sqlite3_column_double(stmt, 2);
+    point.mwh_gpu = sqlite3_column_double(stmt, 3);
+    point.mwh_other = sqlite3_column_double(stmt, 4);
+    point.mwh_estimated = sqlite3_column_double(stmt, 5);
+  }
+  sqlite3_finalize(stmt);
+  return out;
+}
+
 Totals Store::totals(double now_unix) const {
   Totals t;
   if (!db_) return t;

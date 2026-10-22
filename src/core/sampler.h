@@ -15,10 +15,17 @@
 
 namespace wp {
 
+struct SensorStatus {
+  std::string name;
+  bool available = false;
+  bool producing = false;
+};
+
 // Immutable snapshot the UI reads.
 struct Snapshot {
   ModelOutput model;
   std::map<std::int64_t, MinuteBucket> pending;  // not-yet-flushed minutes
+  std::vector<SensorStatus> sensors;
   std::uint64_t ticks = 0;
   bool any_sensor_ok = false;
 };
@@ -63,6 +70,8 @@ class Sampler {
   std::map<std::int64_t, MinuteBucket> pending_;
   std::uint64_t ticks_ = 0;
   bool any_ok_ = false;
+  std::vector<std::string> sensor_names_;
+  std::vector<bool> sensor_available_;
   std::vector<bool> sensor_ok_;
 
   std::atomic<bool> stop_{false};

@@ -5,16 +5,18 @@
 Live device power draw for Windows, plus energy used over the last hour, day,
 week and month. Native C++20, single static exe, no runtime to install.
 
-**v2** (this branch) is a rewrite: multi-source measurement (works on desktops,
-not just laptops), an honest Measured/Estimated provenance label, calibration
-against a wall meter, and a CLI. The Direct2D UI and tray widget are the next
-milestone.
+**v2** is a rewrite: multi-source measurement (works on desktops, not just
+laptops), an honest Measured/Estimated provenance label, calibration against a
+wall meter, and a native Direct2D dashboard with a CLI fallback. The tray widget
+is the next milestone.
 
 ## Build
 
-Requires Visual Studio 2022+ (MSVC) and CMake 3.21+.
+Requires Visual Studio 2022 or newer (MSVC) and CMake 3.21+.
 
 ```powershell
+# Use the generator installed with your Visual Studio; newer releases also
+# provide "Visual Studio 18 2026".
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
@@ -26,13 +28,26 @@ The exe lands at `build\Release\wattpulse.exe`. It is statically linked
 ## Run
 
 ```powershell
+wattpulse.exe                   # open the dashboard (default)
+wattpulse.exe --demo            # dashboard preview with synthetic history
 wattpulse.exe --probe           # what sensors does this machine expose?
-wattpulse.exe --demo            # synthetic data preview (nothing saved)
-wattpulse.exe --run             # live 1 Hz readout + rolling totals on exit
+wattpulse.exe --run             # live 1 Hz CLI readout + totals on exit
 wattpulse.exe --run --silent    # for autostart: no console output
 wattpulse.exe --calibrate 120   # set the modelled base from a wall meter (W)
 wattpulse.exe --autostart on    # start with Windows (off by default)
 ```
+
+## Dashboard
+
+The default window is a Direct2D/DirectWrite dashboard with a light and dark
+theme. It shows the current system draw and its CPU/GPU/other split, the rolling
+energy totals for the last hour, 24 hours, week and month, a power-history chart,
+sensor health, calibration details and storage status.
+
+The chart and one of the total cards can be switched between **last hour, last
+24 hours, last week and last month** using the dropdown. The theme toggle is in
+the top-right corner and is remembered in `settings.ini`. The dashboard samples
+at 1 Hz and writes completed minute buckets to the same `power.db` as the CLI.
 
 ## How it measures
 
@@ -68,7 +83,7 @@ to `%APPDATA%\WattPulse\wattpulse.log` and echoed to the console.
 base_watts=45        # modelled board/RAM/drives draw
 calibrated=false     # true once --calibrate has been run
 autostart=false
-theme=graphite       # graphite | light | system (UI milestone)
+theme=system         # system | light | dark (saved by the dashboard toggle)
 emi_scale=0.001      # EMI PDH counter scale; adjust if readings are 1000x off
 form_factor=desktop  # desktop | laptop | mini | unknown
 ```
@@ -80,8 +95,8 @@ src/
   app/         entry point, settings, single instance, autostart
   core/        Sample, ISensor, Sampler, EnergyIntegrator, PowerModel, Estimator
   sensors/     battery, emi (PDH), nvml, adlx, demo, factory
-  storage/     SQLite minute buckets, rolling totals
-  ui/          text formatting (CLI)
+  storage/     SQLite minute buckets, rolling totals, chart series
+  ui/          Direct2D dashboard + shared text formatting
 tests/         Catch2 unit tests (integrator, model, estimator, store, format)
 third_party/   sqlite3 amalgamation, Catch2 amalgamated, ADLX headers (AMD)
 docs/          sensor-matrix.md

@@ -38,8 +38,11 @@ target_link_libraries(wattpulse_core PUBLIC sqlite3 pdh setupapi advapi32 shell3
 
 add_executable(wattpulse
   src/app/main.cpp
+  src/ui/dashboard.cpp
+  assets/wattpulse.rc
 )
-target_link_libraries(wattpulse PRIVATE wattpulse_core)
+set_target_properties(wattpulse PROPERTIES WIN32_EXECUTABLE TRUE)
+target_link_libraries(wattpulse PRIVATE wattpulse_core d2d1 dwrite dwmapi)
 
 if(WATTPULSE_BUILD_TESTS)
   enable_testing()
