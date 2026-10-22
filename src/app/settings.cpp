@@ -73,6 +73,10 @@ AppSettings load_settings(const std::string& path) {
       try { s.emi_scale = std::stod(val); } catch (...) {}
     } else if (key == "form_factor") {
       s.form_factor = val;
+    } else if (key == "taskbar_pinned") {
+      s.taskbar_pinned = (val == "1" || val == "true");
+    } else if (key == "taskbar_span") {
+      s.taskbar_span = val;
     }
   }
   return s;
@@ -86,7 +90,9 @@ bool save_settings(const std::string& path, const AppSettings& s) {
       << "autostart=" << (s.autostart ? "true" : "false") << "\n"
       << "theme=" << s.theme << "\n"
       << "emi_scale=" << s.emi_scale << "\n"
-      << "form_factor=" << s.form_factor << "\n";
+      << "form_factor=" << s.form_factor << "\n"
+      << "taskbar_pinned=" << (s.taskbar_pinned ? "true" : "false") << "\n"
+      << "taskbar_span=" << s.taskbar_span << "\n";
   return static_cast<bool>(out);
 }
 

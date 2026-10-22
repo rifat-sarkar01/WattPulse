@@ -39,6 +39,7 @@ target_link_libraries(wattpulse_core PUBLIC sqlite3 pdh setupapi advapi32 shell3
 add_executable(wattpulse
   src/app/main.cpp
   src/ui/dashboard.cpp
+  src/ui/taskbar_widget.cpp
   assets/wattpulse.rc
 )
 set_target_properties(wattpulse PROPERTIES WIN32_EXECUTABLE TRUE)

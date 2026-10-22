@@ -29,6 +29,7 @@
 #include "sensors/factory.h"
 #include "storage/store.h"
 #include "ui/format.h"
+#include "ui/taskbar_widget.h"
 
 namespace wp {
 namespace {
@@ -39,6 +40,7 @@ constexpr wchar_t kWindowClass[] = L"WattPulseDashboardWindow";
 constexpr wchar_t kWindowTitle[] = L"WattPulse";
 constexpr int kLogoResource = 102;
 constexpr UINT_PTR kRefreshTimer = 1;
+constexpr UINT kWattPulseUnpinWidget = WM_APP + 1;
 constexpr UINT kDwmUseImmersiveDarkMode = 20;
 constexpr UINT kDwmWindowCornerPreference = 33;
 
@@ -328,8 +330,10 @@ class Dashboard {
         return 0;
       case WM_MOUSELEAVE:
         tracking_mouse_ = false;
-        if (hover_theme_ || hover_span_button_ || hover_total_ >= 0 || hover_option_ >= 0) {
+        if (hover_theme_ || hover_pin_ || hover_span_button_ || hover_total_ >= 0 ||
+            hover_option_ >= 0) {
           hover_theme_ = false;
+          hover_pin_ = false;
           hover_span_button_ = false;
           hover_total_ = -1;
           hover_option_ = -1;
@@ -341,6 +345,9 @@ class Dashboard {
         return 0;
       case WM_KEYDOWN:
         on_key(static_cast<int>(wparam));
+        return 0;
+      case kWattPulseUnpinWidget:
+        set_taskbar_pinned(false);
         return 0;
       case WM_SETTINGCHANGE:
         if (follow_system_) {
@@ -537,6 +544,11 @@ class Dashboard {
     SetTimer(hwnd_, kRefreshTimer, 1000, nullptr);
     refresh_store();
     refresh_live();
+    widget_span_ = parse_widget_span(settings_.taskbar_span);
+    if (settings_.taskbar_pinned) {
+      taskbar_pinned_ = true;
+      ensure_widget();
+    }
     return true;
   }
 
@@ -601,6 +613,63 @@ class Dashboard {
       last_flush_tick_ = snapshot_.ticks;
       if (flush_pending()) refresh_store();
     }
+    update_widget();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+  }
+
+  void update_widget() {
+    if (!widget_) return;
+    WidgetData data;
+    data.watts = snapshot_.model.total_watts;
+    data.measured = snapshot_.model.total_provenance == Provenance::Measured;
+    data.totals = totals_with_pending();
+    data.dark = dark_;
+    data.demo = demo_;
+    widget_->set_data(data);
+  }
+
+  void save_taskbar_settings() {
+    settings_.taskbar_pinned = taskbar_pinned_;
+    settings_.taskbar_span = widget_span_name(widget_span_);
+    if (!save_settings(settings_path_, settings_)) {
+      log_warn("could not save taskbar settings to " + settings_path_);
+    }
+  }
+
+  void ensure_widget() {
+    if (widget_) return;
+    auto widget = std::make_unique<TaskbarWidget>();
+    widget->on_span_changed = [this](WidgetSpan span) {
+      widget_span_ = span;
+      save_taskbar_settings();
+      InvalidateRect(hwnd_, nullptr, FALSE);
+    };
+    widget->on_open_dashboard = [this]() {
+      ShowWindow(hwnd_, SW_RESTORE);
+      SetForegroundWindow(hwnd_);
+    };
+    widget->on_unpin = [this]() { PostMessageW(hwnd_, kWattPulseUnpinWidget, 0, 0); };
+    if (!widget->create(instance_, widget_span_)) {
+      log_warn("could not create the taskbar widget");
+      taskbar_pinned_ = false;
+      save_taskbar_settings();
+      InvalidateRect(hwnd_, nullptr, FALSE);
+      return;
+    }
+    widget_ = std::move(widget);
+    update_widget();
+  }
+
+  void set_taskbar_pinned(bool pinned) {
+    if (taskbar_pinned_ == pinned && widget_) return;
+    taskbar_pinned_ = pinned;
+    save_taskbar_settings();
+    if (pinned) {
+      ensure_widget();
+    } else if (widget_) {
+      widget_->destroy();
+      widget_.reset();
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
   }
 
@@ -643,6 +712,10 @@ class Dashboard {
     if (shut_down_) return;
     shut_down_ = true;
     if (hwnd_) KillTimer(hwnd_, kRefreshTimer);
+    if (widget_) {
+      widget_->destroy();
+      widget_.reset();
+    }
     if (sampler_) {
       sampler_->stop();
       flush_pending();
@@ -694,6 +767,7 @@ class Dashboard {
     }
 
     bool theme_hover = point_in(theme_button_, x, y);
+    bool pin_hover = point_in(pin_button_, x, y);
     bool span_hover = point_in(span_button_, x, y);
     int total_hover = -1;
     for (int i = 0; i < 4; ++i) {
@@ -705,9 +779,11 @@ class Dashboard {
         if (point_in(span_options_[i], x, y)) option_hover = i;
       }
     }
-    if (theme_hover != hover_theme_ || span_hover != hover_span_button_ ||
-        total_hover != hover_total_ || option_hover != hover_option_) {
+    if (theme_hover != hover_theme_ || pin_hover != hover_pin_ ||
+        span_hover != hover_span_button_ || total_hover != hover_total_ ||
+        option_hover != hover_option_) {
       hover_theme_ = theme_hover;
+      hover_pin_ = pin_hover;
       hover_span_button_ = span_hover;
       hover_total_ = total_hover;
       hover_option_ = option_hover;
@@ -739,7 +815,12 @@ class Dashboard {
         log_warn("could not save theme to " + settings_path_);
       }
       apply_window_theme();
+      update_widget();
       InvalidateRect(hwnd_, nullptr, FALSE);
+      return;
+    }
+    if (point_in(pin_button_, x, y)) {
+      set_taskbar_pinned(!taskbar_pinned_);
       return;
     }
     if (point_in(span_button_, x, y)) {
@@ -900,9 +981,19 @@ class Dashboard {
     draw_text(theme_text, pill_, inset(theme_button_, 12.0f, 0.0f), theme.text,
               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false);
 
+    const float pin_width = 142.0f;
+    pin_button_ = D2D1::RectF(theme_button_.left - pin_width - 10.0f, button_y,
+                              theme_button_.left - 10.0f, button_y + 32.0f);
+    fill_round(pin_button_, 16.0f, hover_pin_ || taskbar_pinned_ ? theme.accent_soft : theme.card);
+    stroke_round(pin_button_, 16.0f, taskbar_pinned_ ? theme.accent : theme.border);
+    const wchar_t* pin_text = taskbar_pinned_ ? L"Pinned to taskbar" : L"Pin to taskbar";
+    draw_text(pin_text, pill_, inset(pin_button_, 10.0f, 0.0f),
+              taskbar_pinned_ ? theme.accent : theme.text, DWRITE_TEXT_ALIGNMENT_CENTER,
+              DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false);
+
     const float status_width = 148.0f;
-    const D2D1_RECT_F status = D2D1::RectF(theme_button_.left - status_width - 10.0f, button_y,
-                                           theme_button_.left - 10.0f, button_y + 32.0f);
+    const D2D1_RECT_F status = D2D1::RectF(pin_button_.left - status_width - 10.0f, button_y,
+                                           pin_button_.left - 10.0f, button_y + 32.0f);
     fill_round(status, 16.0f, theme.card);
     stroke_round(status, 16.0f, theme.border);
     int online = 0;
@@ -1417,6 +1508,9 @@ class Dashboard {
   Totals store_totals_;
   std::vector<SeriesPoint> series_;
   std::unique_ptr<Sampler> sampler_;
+  std::unique_ptr<TaskbarWidget> widget_;
+  WidgetSpan widget_span_ = WidgetSpan::None;
+  bool taskbar_pinned_ = false;
   Snapshot snapshot_;
   double now_ = 0.0;
   std::uint64_t last_flush_tick_ = 0;
@@ -1445,12 +1539,14 @@ class Dashboard {
   ComPtr<IDWriteTextFormat> menu_;
 
   D2D1_RECT_F theme_button_{};
+  D2D1_RECT_F pin_button_{};
   D2D1_RECT_F span_button_{};
   D2D1_RECT_F span_menu_{};
   D2D1_RECT_F span_options_[4]{};
   D2D1_RECT_F total_cards_[4]{};
 
   bool hover_theme_ = false;
+  bool hover_pin_ = false;
   bool hover_span_button_ = false;
   int hover_total_ = -1;
   int hover_option_ = -1;

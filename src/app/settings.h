@@ -13,6 +13,8 @@ struct AppSettings {
   std::string theme = "system";  // system | light | dark (graphite = legacy dark)
   double emi_scale = 0.001;        // EMI PDH counters report milliwatts
   std::string form_factor = "desktop";
+  bool taskbar_pinned = false;
+  std::string taskbar_span = "none";  // none | hour | day | week | month
 };
 
 // %APPDATA%\WattPulse\settings.ini (key=value). Missing file -> defaults.

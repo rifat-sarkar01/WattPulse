@@ -7,8 +7,8 @@ week and month. Native C++20, single static exe, no runtime to install.
 
 **v2** is a rewrite: multi-source measurement (works on desktops, not just
 laptops), an honest Measured/Estimated provenance label, calibration against a
-wall meter, and a native Direct2D dashboard with a CLI fallback. The tray widget
-is the next milestone.
+wall meter, and a native Direct2D dashboard with a CLI fallback plus a compact
+live meter that docks next to the taskbar.
 
 ## Build
 
@@ -49,6 +49,13 @@ The chart and one of the total cards can be switched between **last hour, last
 the top-right corner and is remembered in `settings.ini`. The dashboard samples
 at 1 Hz and writes completed minute buckets to the same `power.db` as the CLI.
 
+**Pin to taskbar** docks a compact always-on-top meter above the taskbar. It
+shows the live system draw and, optionally, one rolling total. Right-click it (or
+click the chevron) to choose *Live draw only*, last hour, last 24 hours, last
+week or last month, or to unpin. Click it to bring the dashboard back. The pinned state and chosen total
+are remembered. (Windows 11 has no supported public deskband API, so the meter is
+a borderless window that follows the taskbar edge rather than a shell band.)
+
 ## How it measures
 
 v1 read only the battery driver, so it could not run on a desktop. v2 tries
@@ -86,6 +93,8 @@ autostart=false
 theme=system         # system | light | dark (saved by the dashboard toggle)
 emi_scale=0.001      # EMI PDH counter scale; adjust if readings are 1000x off
 form_factor=desktop  # desktop | laptop | mini | unknown
+taskbar_pinned=false # true after "Pin to taskbar" (restores the meter on launch)
+taskbar_span=none    # none | hour | day | week | month (extra total in the meter)
 ```
 
 ## Layout
