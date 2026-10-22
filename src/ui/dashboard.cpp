@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -36,6 +37,7 @@ using Microsoft::WRL::ComPtr;
 
 constexpr wchar_t kWindowClass[] = L"WattPulseDashboardWindow";
 constexpr wchar_t kWindowTitle[] = L"WattPulse";
+constexpr int kLogoResource = 102;
 constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT kDwmUseImmersiveDarkMode = 20;
 constexpr UINT kDwmWindowCornerPreference = 33;
@@ -374,6 +376,11 @@ class Dashboard {
                                        dwrite_.GetAddressOf())))) {
       return false;
     }
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                __uuidof(IWICImagingFactory),
+                                reinterpret_cast<void**>(wic_.GetAddressOf())))) {
+      return false;
+    }
     return create_text_formats();
   }
 
@@ -427,10 +434,45 @@ class Dashboard {
       target_.Reset();
       return false;
     }
+    load_logo();
     return true;
   }
 
+  void load_logo() {
+    logo_.Reset();
+    if (!wic_ || !target_) return;
+    const HRSRC res = FindResourceW(instance_, MAKEINTRESOURCEW(kLogoResource), RT_RCDATA);
+    if (!res) return;
+    const DWORD size = SizeofResource(instance_, res);
+    const HGLOBAL data = LoadResource(instance_, res);
+    const void* bytes = data ? LockResource(data) : nullptr;
+    if (!bytes || size == 0) return;
+
+    ComPtr<IWICStream> stream;
+    if (FAILED(wic_->CreateStream(stream.GetAddressOf()))) return;
+    if (FAILED(stream->InitializeFromMemory(static_cast<BYTE*>(const_cast<void*>(bytes)),
+                                            size))) {
+      return;
+    }
+    ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(wic_->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand,
+                                             decoder.GetAddressOf()))) {
+      return;
+    }
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, frame.GetAddressOf()))) return;
+    ComPtr<IWICFormatConverter> converter;
+    if (FAILED(wic_->CreateFormatConverter(converter.GetAddressOf()))) return;
+    if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeCustom))) {
+      return;
+    }
+    target_->CreateBitmapFromWicBitmap(converter.Get(), nullptr, logo_.GetAddressOf());
+  }
+
   void discard_target() {
+    logo_.Reset();
     brush_.Reset();
     target_.Reset();
   }
@@ -833,9 +875,15 @@ class Dashboard {
 
   void draw_header(const Theme& theme, float x, float y, float right) {
     const float logo = 36.0f;
-    fill_round(D2D1::RectF(x, y, x + logo, y + logo), 10.0f, theme.accent);
-    draw_text(L"W", brand_, D2D1::RectF(x, y, x + logo, y + logo), rgb(0xFFFFFF),
-              DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false);
+    const D2D1_RECT_F logo_rect = D2D1::RectF(x, y, x + logo, y + logo);
+    if (logo_) {
+      target_->DrawBitmap(logo_.Get(), logo_rect, 1.0f,
+                          D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    } else {
+      fill_round(logo_rect, 10.0f, theme.accent);
+      draw_text(L"W", brand_, logo_rect, rgb(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false);
+    }
     draw_text(L"WattPulse", brand_, D2D1::RectF(x + logo + 12.0f, y - 1.0f, right, y + 21.0f),
               theme.text);
     draw_text(demo_ ? L"Demo mode \x00B7 nothing is saved" : L"Live system power",
@@ -1375,8 +1423,10 @@ class Dashboard {
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> dwrite_;
+  ComPtr<IWICImagingFactory> wic_;
   ComPtr<ID2D1HwndRenderTarget> target_;
   ComPtr<ID2D1SolidColorBrush> brush_;
+  ComPtr<ID2D1Bitmap> logo_;
 
   ComPtr<IDWriteTextFormat> brand_;
   ComPtr<IDWriteTextFormat> subtitle_;
@@ -1409,9 +1459,14 @@ class Dashboard {
 }  // namespace
 
 int run_dashboard(HINSTANCE instance, bool demo) {
-  Dashboard dashboard(instance, demo);
-  if (!dashboard.create()) return 1;
-  return dashboard.message_loop();
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  int result = 1;
+  {
+    Dashboard dashboard(instance, demo);
+    if (dashboard.create()) result = dashboard.message_loop();
+  }
+  if (SUCCEEDED(com)) CoUninitialize();
+  return result;
 }
 
 bool focus_dashboard_window() {

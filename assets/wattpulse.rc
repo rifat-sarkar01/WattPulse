@@ -1,5 +1,7 @@
 #include <windows.h>
 
 #define IDI_WATTPULSE 101
+#define IDR_WATTPULSE_LOGO 102
 
 IDI_WATTPULSE ICON "wattpulse.ico"
+IDR_WATTPULSE_LOGO RCDATA "wattpulse.png"

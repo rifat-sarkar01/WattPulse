@@ -42,7 +42,7 @@ add_executable(wattpulse
   assets/wattpulse.rc
 )
 set_target_properties(wattpulse PROPERTIES WIN32_EXECUTABLE TRUE)
-target_link_libraries(wattpulse PRIVATE wattpulse_core d2d1 dwrite dwmapi)
+target_link_libraries(wattpulse PRIVATE wattpulse_core d2d1 dwrite dwmapi windowscodecs)
 
 if(WATTPULSE_BUILD_TESTS)
   enable_testing()
